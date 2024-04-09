@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/go-resty/resty/v2"
@@ -45,6 +46,22 @@ type TradingViewAlert struct {
 	Message      string  `json:"message"`
 }
 
+type NewsAPIResponse struct {
+	Status       string `json:"status"`
+	TotalResults int    `json:"totalResults"`
+	Articles     []struct {
+		Source struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"source"`
+		Author      string    `json:"author"`
+		Title       string    `json:"title"`
+		Description string    `json:"description"`
+		URL         string    `json:"url"`
+		PublishedAt time.Time `json:"publishedAt"`
+	} `json:"articles"`
+}
+
 // Main function initializes the application.
 func main() {
 	if err := godotenv.Load(); err != nil {
@@ -71,6 +88,14 @@ func main() {
 	}
 
 	handleUpdates(updates)
+}
+
+func parseCommand(text string) (string, string) {
+	parts := strings.Split(text, " ")
+	if len(parts) > 1 {
+		return parts[0], parts[1]
+	}
+	return parts[0], ""
 }
 
 // getEnvVar retrieves environment variables and logs a fatal error if not set.
@@ -128,40 +153,63 @@ func handleUpdates(updates tgbotapi.UpdatesChannel) {
 		}
 
 		chatID := update.Message.Chat.ID
+		command, ticker := parseCommand(update.Message.Text)
 
-		switch update.Message.Text {
+		switch command {
 		case "/panic-news":
 			db := initDB()
 			defer db.Close()
-			fetchCryptoNews(chatID, db)
+			fetchCryptoNews(chatID, db, ticker) // Pass ticker
 		case "/compare-news":
-			fetchCryptoCompareNews(chatID)
+			fetchCryptoCompareNews(chatID, ticker) // Pass ticker
+		case "/news":
+			fetchNewsAPI(chatID, ticker) // Pass ticker
+
 		default:
 			response := getOpenAIResponse(update.Message.Text)
-			sendMessage(update.Message.Chat.ID, response)
+			sendMessage(chatID, []string{response})
 		}
 	}
 }
 
 // fetchCryptoNews fetches crypto news from CryptoPanic and stores them in the database.
-func fetchCryptoNews(chatID int64, db *sql.DB) {
+func fetchCryptoNews(chatID int64, db *sql.DB, ticker string) {
 	client := resty.New()
 	authToken := getEnvVar("CRYPTOPANIC_AUTH_TOKEN")
-	response, err := client.R().
+	req := client.R().
 		SetQueryParam("auth_token", authToken).
-		SetQueryParam("kind", "news").
-		Get("https://cryptopanic.com/api/v1/posts/")
+		SetQueryParam("kind", "news")
+
+	if ticker != "" {
+		req.SetQueryParam("filter", ticker) // Assuming API supports a 'filter' parameter
+	}
+
+	response, err := req.Get("https://cryptopanic.com/api/v1/posts/")
 	if err != nil {
 		log.Printf("Error fetching crypto news: %v", err)
-		sendMessage(chatID, "Error fetching crypto news.")
+		sendMessage(chatID, []string{"Error fetching crypto news."})
 		return
 	}
 
 	var data CryptoPanicResponse
 	if err := json.Unmarshal(response.Body(), &data); err != nil {
 		log.Printf("Error processing news data: %v", err)
-		sendMessage(chatID, "Error processing news data.")
+		sendMessage(chatID, []string{"Error processing news data."})
 		return
+	}
+
+	// If the API does not support filtering, do it manually here
+	if ticker != "" {
+		filteredResults := []struct {
+			Title string `json:"title"`
+			URL   string `json:"url"`
+		}{}
+		for _, item := range data.Results {
+			if strings.Contains(item.Title, ticker) { // Simple string matching; adjust as needed
+				filteredResults = append(filteredResults, item)
+			}
+		}
+		data.Results = filteredResults
 	}
 
 	insertSQL := `INSERT INTO news (title, url, published_at) VALUES (?, ?, ?)`
@@ -172,11 +220,11 @@ func fetchCryptoNews(chatID int64, db *sql.DB) {
 		}
 	}
 
-	sendMessage(chatID, formatNewsResponse(data))
+	sendMessage(chatID, []string{formatNewsResponse(data)})
 }
 
 // fetchCryptoCompareNews fetches news from CryptoCompare API.
-func fetchCryptoCompareNews(chatID int64) {
+func fetchCryptoCompareNews(chatID int64, ticker string) {
 	client := resty.New()
 	apiKey := getEnvVar("CRYPTOCOMPARE_API_KEY")
 	response, err := client.R().
@@ -184,18 +232,36 @@ func fetchCryptoCompareNews(chatID int64) {
 		Get("https://min-api.cryptocompare.com/data/v2/news/?lang=EN")
 	if err != nil {
 		log.Printf("Error fetching crypto compare news: %v", err)
-		sendMessage(chatID, "Error fetching crypto compare news.")
+		sendMessage(chatID, []string{"Error fetching news."})
 		return
 	}
 
 	var data CryptoNewsResponse
 	if err := json.Unmarshal(response.Body(), &data); err != nil {
 		log.Printf("Error processing news data: %v", err)
-		sendMessage(chatID, "Error processing news data.")
+		sendMessage(chatID, []string{"Error processing news data."})
 		return
 	}
 
-	sendMessage(chatID, formatNewsResponseFromCryptoCompare(data))
+	// Manual filtering if ticker is specified and not supported by the API directly
+	if ticker != "" {
+		filteredData := []struct {
+			ID          string `json:"id"`
+			Title       string `json:"title"`
+			Body        string `json:"body"`
+			PublishedOn int64  `json:"published_on"`
+			URL         string `json:"url"`
+		}{}
+		for _, item := range data.Data {
+			// Here you could match against the title or body; this example matches the title
+			if strings.Contains(strings.ToUpper(item.Title), strings.ToUpper(ticker)) {
+				filteredData = append(filteredData, item)
+			}
+		}
+		data.Data = filteredData
+	}
+
+	sendMessage(chatID, []string{formatNewsResponseFromCryptoCompare(data)})
 }
 
 // formatNewsResponse formats the news data from CryptoPanic for Telegram display.
@@ -212,6 +278,60 @@ func formatNewsResponseFromCryptoCompare(data CryptoNewsResponse) string {
 	newsMessage := "Latest Market News:\n"
 	for _, item := range data.Data {
 		newsMessage += fmt.Sprintf("%s\n%s\n\n", item.Title, item.URL)
+	}
+	return newsMessage
+}
+
+// Fetches news from NewsAPI filtered by a specific ticker and from the last 30 minutes
+func fetchNewsAPI(chatID int64, ticker string) {
+	client := resty.New()
+	apiKey := getEnvVar("NEWSAPI_API_KEY") // Make sure you have NEWSAPI_API_KEY in your environment variables
+
+	// Calculate the time 30 minutes ago from now
+	fromTime := time.Now().Add(-48 * time.Hour).Format(time.RFC3339)
+
+	// Construct the URL for the 'everything' endpoint instead of 'top-headlines'
+
+	response, err := client.R().
+		SetQueryParam("apiKey", apiKey).
+		SetQueryParam("q", ticker).             // Ensure the query is non-empty
+		SetQueryParam("from", fromTime).        // Articles published in the last 30 minutes
+		SetQueryParam("sortBy", "publishedAt"). // Correct parameter for sorting by publication date
+		SetQueryParam("pageSize", "5").
+		Get("https://newsapi.org/v2/everything")
+
+	if err != nil {
+		log.Printf("Error fetching news from NewsAPI: %v", err)
+		sendMessage(chatID, []string{"Error fetching news."})
+		return
+	}
+
+	// print request URL
+	log.Printf("Request URL: %v", response.Request.URL)
+
+	// Define the struct for parsing the JSON response
+	var data NewsAPIResponse
+
+	if err := json.Unmarshal(response.Body(), &data); err != nil {
+		log.Printf("Error processing news data from NewsAPI: %v", err)
+		sendMessage(chatID, []string{"Error processing news data."})
+		return
+	}
+
+	// Format the response into a readable message
+	sendMessage(chatID, []string{formatNewsAPIResponse(data)})
+}
+
+// Function to format NewsAPI response
+func formatNewsAPIResponse(data NewsAPIResponse) string {
+	if data.TotalResults == 0 {
+		return "No recent news found for the given topic."
+	}
+
+	newsMessage := "Latest News:\n"
+	for _, article := range data.Articles {
+		newsMessage += fmt.Sprintf("Title: %s\nAuthor: %s\nSource: %s\nPublished: %s\nURL: %s\n\n",
+			article.Title, article.Author, article.Source.Name, article.PublishedAt.Format(time.RFC1123), article.URL)
 	}
 	return newsMessage
 }
@@ -263,11 +383,13 @@ func extractOpenAIResponse(data map[string]interface{}) string {
 	return "Failed to extract response."
 }
 
-// sendMessage sends a generic message to a specific Telegram chat.
-func sendMessage(chatID int64, text string) {
-	msg := tgbotapi.NewMessage(chatID, text)
-	if _, err := bot.Send(msg); err != nil {
-		log.Printf("Failed to send message: %v", err)
+// sendMessage sends multiple messages to a specific Telegram chat if the content is too long.
+func sendMessage(chatID int64, messages []string) {
+	for _, message := range messages {
+		msg := tgbotapi.NewMessage(chatID, message)
+		if _, err := bot.Send(msg); err != nil {
+			log.Printf("Failed to send message: %v", err)
+		}
 	}
 }
 
