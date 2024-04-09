@@ -10,6 +10,13 @@ type CryptoNewsResponse struct {
 	} `json:"Data"`
 }
 
+type CryptoPanicResponse struct {
+	Results []struct {
+		Title string `json:"title"`
+		URL   string `json:"url"`
+	} `json:"results"`
+}
+
 type TradingViewAlert struct {
 	StrategyName string  `json:"strategyName"`
 	Ticker       string  `json:"ticker"`

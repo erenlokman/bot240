@@ -7,19 +7,24 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-func InitDB() *sql.DB {
+func InitDB() (*sql.DB, error) {
 	db, err := sql.Open("sqlite3", "./crypto_news.db")
 	if err != nil {
 		log.Fatal("Error opening database: ", err)
+		return nil, err
 	}
+
 	createTableSQL := `CREATE TABLE IF NOT EXISTS news (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        title TEXT NOT NULL,
-        url TEXT NOT NULL,
-        published_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );`
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		title TEXT NOT NULL,
+		url TEXT NOT NULL,
+		published_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);`
+
 	if _, err = db.Exec(createTableSQL); err != nil {
 		log.Fatal("Error creating table: ", err)
+		return nil, err
 	}
-	return db
+
+	return db, nil
 }
