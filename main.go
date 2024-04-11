@@ -158,18 +158,24 @@ func handleUpdates(updates tgbotapi.UpdatesChannel) {
 
 		chatID := update.Message.Chat.ID
 		command, ticker := parseCommand(update.Message.Text)
+		db := initDB()
 
 		switch command {
 		case "/panic-news":
-			db := initDB()
-			defer db.Close()
 			fetchCryptoNews(chatID, db, ticker) // Pass ticker
+			db.Close()
 		case "/compare-news":
-			fetchCryptoCompareNews(chatID, ticker) // Pass ticker
+			fetchCryptoCompareNews(chatID, db, ticker) // Pass ticker
+			db.Close()
+
 		case "/news":
-			fetchNewsAPI(chatID, ticker) // Pass ticker
+			fetchNewsAPI(chatID, db, ticker) // Pass ticker
+			db.Close()
+
 		case "/analyze":
-			fetchNewsAPI(chatID, ticker)
+			fetchNewsAPI(chatID, db, ticker)
+			db.Close()
+
 		default:
 			response := getOpenAIResponse(update.Message.Text)
 			sendMessage(chatID, []string{response})
@@ -229,7 +235,7 @@ func fetchCryptoNews(chatID int64, db *sql.DB, ticker string) {
 }
 
 // fetchCryptoCompareNews fetches news from CryptoCompare API.
-func fetchCryptoCompareNews(chatID int64, ticker string) {
+func fetchCryptoCompareNews(chatID int64, db *sql.DB, ticker string) {
 	client := resty.New()
 	apiKey := getEnvVar("CRYPTOCOMPARE_API_KEY")
 	response, err := client.R().
@@ -267,6 +273,15 @@ func fetchCryptoCompareNews(chatID int64, ticker string) {
 		data.Data = filteredData
 	}
 
+	// Insert the news into the database
+	insertSQL := `INSERT INTO news (title, url, published_at) VALUES (?, ?, ?)`
+	for _, item := range data.Data {
+		_, err := db.Exec(insertSQL, item.Title, item.URL, time.Now())
+		if err != nil {
+			log.Printf("Failed to insert news item: %v", err)
+		}
+	}
+
 	sendMessage(chatID, []string{formatNewsResponseFromCryptoCompare(data)})
 }
 
@@ -289,7 +304,7 @@ func formatNewsResponseFromCryptoCompare(data CryptoNewsResponse) string {
 }
 
 // Fetches news from NewsAPI filtered by a specific ticker and from the last 30 minutes
-func fetchNewsAPI(chatID int64, ticker string) {
+func fetchNewsAPI(chatID int64, db *sql.DB, ticker string) {
 	client := resty.New()
 	apiKey := getEnvVar("NEWSAPI_API_KEY") // Make sure you have NEWSAPI_API_KEY in your environment variables
 
@@ -334,6 +349,15 @@ func fetchNewsAPI(chatID int64, ticker string) {
 		analyzeNewsWithAI(chatID, data.Articles)
 	} else {
 		sendMessage(chatID, []string{"No relevant articles found for analysis."})
+	}
+
+	// Insert the news into the database
+	insertSQL := `INSERT INTO news (title, url, published_at) VALUES (?, ?, ?)`
+	for _, article := range data.Articles {
+		_, err := db.Exec(insertSQL, article.Title, article.URL, article.PublishedAt)
+		if err != nil {
+			log.Printf("Failed to insert news item: %v", err)
+		}
 	}
 
 	// Format the response into a readable message
